@@ -26,6 +26,8 @@ type SlackSlashCommand = {
   api_app_id: string;
 };
 
+type EventType = 'tag' | 'deploy';
+
 const authorize = ({
   rawBody,
   headers: { 'X-Slack-Signature': signature, 'X-Slack-Request-Timestamp': timestamp }
@@ -55,9 +57,22 @@ const endpoint = new awsx.apigateway.API('saga', {
             text
           });
 
+        const notifyProdChannel = async (eventType: EventType) => {
+          const prodChannelId = 'CR4MU5RLN';
+          const actions: Record<EventType, string> = {
+            tag: 'tagged a new release',
+            deploy: 'triggered a deployment'
+          }
+          return axios.post(body.response_url, {
+            response_type: 'ephemeral',
+            channel: prodChannelId,
+            text: `${body.user_name} ${actions[eventType]}`
+          });
+        }
+
         try {
           const args = body.text?.split(' ');
-          const eventType = args[0];
+          const eventType = args[0] as EventType;
 
           await new Octokit({ auth: githubToken }).rest.repos.createDispatchEvent({
             repo,
@@ -67,6 +82,7 @@ const endpoint = new awsx.apigateway.API('saga', {
           });
 
           await respondToSlack('On it!');
+          await notifyProdChannel(eventType);
         } catch (e) {
           console.error(e);
           await respondToSlack('Failed to trigger GitHub Actions - see saga cloudwatch logs for details');
