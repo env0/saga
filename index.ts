@@ -1,3 +1,4 @@
+import * as aws from '@pulumi/aws';
 import * as awsx from '@pulumi/awsx';
 import * as querystring from 'querystring';
 import * as crypto from 'crypto';
@@ -44,36 +45,39 @@ const endpoint = new awsx.apigateway.API('saga', {
     {
       path: '',
       method: 'POST',
-      eventHandler: async ({ body: rawBody, headers }) => {
-        authorize({ rawBody, headers: headers as any });
+      eventHandler: new aws.lambda.CallbackFunction('saga', {
+        runtime: 'nodejs16.x',
+        callback: async ({ body: rawBody, headers }) => {
+          authorize({ rawBody, headers: headers as any });
 
-        const body = querystring.parse(Buffer.from(rawBody, 'base64').toString('utf-8')) as SlackSlashCommand;
+          const body = querystring.parse(Buffer.from(rawBody, 'base64').toString('utf-8')) as SlackSlashCommand;
 
-        const respondToSlack = async text =>
-          axios.post(body.response_url, {
-            response_type: 'ephemeral',
-            text
-          });
+          const respondToSlack = async text =>
+            axios.post(body.response_url, {
+              response_type: 'ephemeral',
+              text
+            });
 
-        try {
-          const args = body.text?.split(' ');
-          const eventType = args[0];
+          try {
+            const args = body.text?.split(' ');
+            const eventType = args[0];
 
-          await new Octokit({ auth: githubToken }).rest.repos.createDispatchEvent({
-            repo,
-            owner,
-            event_type: `saga-${eventType}`,
-            client_payload: { ...pick(body, 'command', 'user_name'), args }
-          });
+            await new Octokit({ auth: githubToken }).rest.repos.createDispatchEvent({
+              repo,
+              owner,
+              event_type: `saga-${eventType}`,
+              client_payload: { ...pick(body, 'command', 'user_name'), args }
+            });
 
-          await respondToSlack('On it!');
-        } catch (e) {
-          console.error(e);
-          await respondToSlack('Failed to trigger GitHub Actions - see saga cloudwatch logs for details');
+            await respondToSlack('On it!');
+          } catch (e) {
+            console.error(e);
+            await respondToSlack('Failed to trigger GitHub Actions - see saga cloudwatch logs for details');
+          }
+
+          return { statusCode: 200, body: '' };
         }
-
-        return { statusCode: 200, body: '' };
-      }
+      })
     }
   ]
 });
