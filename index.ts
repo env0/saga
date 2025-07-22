@@ -1,7 +1,6 @@
 import * as aws from '@pulumi/aws';
 import * as awsx from '@pulumi/awsx';
 import * as querystring from 'querystring';
-import * as crypto from 'crypto';
 import axios from 'axios';
 import { Octokit } from '@octokit/rest';
 import { pick } from 'lodash';
@@ -31,6 +30,7 @@ const authorize = ({
   rawBody,
   headers: { 'X-Slack-Signature': signature, 'X-Slack-Request-Timestamp': timestamp }
 }) => {
+  const crypto = require('crypto'); // <= moved inside
   const version = 'v0';
   const basestring = `${version}:${timestamp}:${rawBody}`;
   const hash = crypto.createHmac('sha256', slackSigningSecret).update(basestring).digest('hex');
