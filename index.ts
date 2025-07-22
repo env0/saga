@@ -71,7 +71,7 @@ const endpoint = new awsx.apigateway.API('saga', {
           try {
             // First, authorize the request. Throws an error on failure.
             authorize({ rawBody, headers: headers as any });
-          } catch (error: any) {
+          } catch (error) {
             console.error('Authorization failed:', error.message);
             // Return an error status if authorization fails
             return { statusCode: 401, body: 'Authorization failed.' };
@@ -110,7 +110,7 @@ const endpoint = new awsx.apigateway.API('saga', {
 
               // On success, send a confirmation message back to Slack
               await respondToSlack(`✅ Successfully triggered GitHub Action for \`${eventType}\`!`);
-            } catch (e: any) {
+            } catch (e) {
               console.error(e);
               // On failure, send an error message back to Slack
               await respondToSlack('❌ Failed to trigger GitHub Actions. Please check the logs for details.');
