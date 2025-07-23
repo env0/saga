@@ -61,7 +61,7 @@ const authorize = ({
 // --- Lambda #2: The Worker ---
 // This function performs the long-running task of calling the GitHub API.
 const workerLambda = new aws.lambda.CallbackFunction('saga-worker', {
-  runtime: 'nodejs18.x',
+  runtime: 'nodejs16.x',
   environment: {
     variables: {
       GITHUB_OWNER: owner,
@@ -126,7 +126,7 @@ new aws.iam.RolePolicy('saga-ack-role-invoke-policy', {
 // This function receives the request from Slack, responds immediately,
 // and triggers the worker Lambda asynchronously.
 const acknowledgerLambda = new aws.lambda.CallbackFunction('saga-acknowledger', {
-  runtime: 'nodejs18.x',
+  runtime: 'nodejs16.x',
   role: acknowledgerRole,
   environment: {
     variables: {
@@ -162,7 +162,7 @@ const acknowledgerLambda = new aws.lambda.CallbackFunction('saga-acknowledger', 
           text: 'On it! 🚀 Triggering the workflow now...'
         })
       };
-    } catch (e: any) {
+    } catch (e) {
       console.error(e);
       return {
         statusCode: 500,
