@@ -6,6 +6,7 @@
         "prettier": "^2.6.2"
     },
     "dependencies": {
+        "@aws-sdk/client-lambda": "^3.851.0",
         "@octokit/rest": "^18.12.0",
         "@pulumi/aws": "^5.0.0",
         "@pulumi/awsx": "^0.40.0",
