@@ -6,7 +6,5 @@
   "parser": "typescript",
   "proseWrap": "preserve",
   "quoteProps": "as-needed",
-  "doc": false,
-  "jsxBracketSameLine": true,
   "arrowParens": "avoid"
 }

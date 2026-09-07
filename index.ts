@@ -1,14 +1,21 @@
 import * as aws from '@pulumi/aws';
-import * as awsx from '@pulumi/awsx';
-import * as querystring from 'querystring';
-import axios from 'axios';
-import { Octokit } from '@octokit/rest';
-import { pick } from 'lodash';
+import * as awsx from '@pulumi/awsx/classic';
+import { createHmac, timingSafeEqual } from 'crypto';
 
-const owner = process.env.GITHUB_OWNER;
-const repo = process.env.GITHUB_REPO;
-const githubToken = process.env.GITHUB_TOKEN;
-const slackSigningSecret = process.env.SLACK_SIGNING_SECRET;
+const requireEnv = (name: string): string => {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable ${name}`);
+  }
+  return value;
+};
+
+const githubOwner = requireEnv('GITHUB_OWNER');
+const githubRepo = requireEnv('GITHUB_REPO');
+const githubToken = requireEnv('GITHUB_TOKEN');
+const slackSigningSecret = requireEnv('SLACK_SIGNING_SECRET');
+
+const runtime = aws.lambda.Runtime.NodeJS24dX;
 
 type SlackSlashCommand = {
   token: string;
@@ -26,60 +33,161 @@ type SlackSlashCommand = {
   api_app_id: string;
 };
 
-const authorize = ({
-  rawBody,
-  headers: { 'X-Slack-Signature': signature, 'X-Slack-Request-Timestamp': timestamp }
-}) => {
-  const crypto = require('crypto'); // <= moved inside
-  const version = 'v0';
-  const basestring = `${version}:${timestamp}:${rawBody}`;
-  const hash = crypto.createHmac('sha256', slackSigningSecret).update(basestring).digest('hex');
+const SLACK_MAX_REQUEST_AGE_SECONDS = 5 * 60;
 
-  if (signature === `${version}=${hash}`) {
-    throw new Error(`'The Slack App installation token doesn't match the one set on saga's record`);
+const headerValue = (headers: awsx.apigateway.Request['headers'], name: string): string | undefined =>
+  Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+
+const isSlackSignatureValid = ({
+  rawBody,
+  timestamp,
+  signature,
+  signingSecret
+}: {
+  rawBody: string;
+  timestamp?: string;
+  signature?: string;
+  signingSecret: string;
+}): boolean => {
+  if (!timestamp || !signature) {
+    return false;
   }
+
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > SLACK_MAX_REQUEST_AGE_SECONDS) {
+    return false;
+  }
+
+  const expected = `v0=${createHmac('sha256', signingSecret).update(`v0:${timestamp}:${rawBody}`).digest('hex')}`;
+
+  return expected.length === signature.length && timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
 };
 
-const endpoint = new awsx.apigateway.API('saga', {
-  routes: [
-    {
-      path: '',
-      method: 'POST',
-      eventHandler: new aws.lambda.CallbackFunction('saga', {
-        runtime: 'nodejs16.x',
-        callback: async ({ body: rawBody, headers }) => {
-          authorize({ rawBody, headers: headers as any });
+const worker = new aws.lambda.CallbackFunction('saga-worker', {
+  runtime,
+  timeout: 30,
+  environment: {
+    variables: { GITHUB_OWNER: githubOwner, GITHUB_REPO: githubRepo, GITHUB_TOKEN: githubToken }
+  },
+  callback: async (command: SlackSlashCommand): Promise<void> => {
+    const respondToSlack = async (text: string) => {
+      const response = await fetch(command.response_url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response_type: 'ephemeral', text })
+      });
 
-          const body = querystring.parse(Buffer.from(rawBody, 'base64').toString('utf-8')) as SlackSlashCommand;
+      if (!response.ok) {
+        console.error(`Slack response_url returned ${response.status}: ${await response.text()}`);
+      }
+    };
 
-          const respondToSlack = async text =>
-            axios.post(body.response_url, {
-              response_type: 'ephemeral',
-              text
-            });
+    try {
+      const args = command.text?.trim().split(/\s+/).filter(Boolean) ?? [];
+      const [eventType] = args;
 
-          try {
-            const args = body.text?.split(' ');
-            const eventType = args[0];
+      if (!eventType) {
+        await respondToSlack(`Usage: ${command.command} <event> [args...]`);
+        return;
+      }
 
-            await new Octokit({ auth: githubToken }).rest.repos.createDispatchEvent({
-              repo,
-              owner,
-              event_type: `saga-${eventType}`,
-              client_payload: { ...pick(body, 'command', 'user_name'), args }
-            });
+      const { GITHUB_OWNER, GITHUB_REPO, GITHUB_TOKEN } = process.env;
+      const response = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/dispatches`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${GITHUB_TOKEN}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'saga',
+          'X-GitHub-Api-Version': '2022-11-28'
+        },
+        body: JSON.stringify({
+          event_type: `saga-${eventType}`,
+          client_payload: { command: command.command, user_name: command.user_name, args }
+        })
+      });
 
-            await respondToSlack('On it!');
-          } catch (e) {
-            console.error(e);
-            await respondToSlack('Failed to trigger GitHub Actions - see saga cloudwatch logs for details');
-          }
-
-          return { statusCode: 200, body: '' };
-        }
-      })
+      if (!response.ok) {
+        throw new Error(`GitHub dispatch failed with ${response.status}: ${await response.text()}`);
+      }
+    } catch (e) {
+      console.error(e);
+      await respondToSlack('Failed to trigger GitHub Actions - see saga cloudwatch logs for details');
     }
-  ]
+  }
 });
 
-exports.endpoint = endpoint.url;
+const receiverRole = new aws.iam.Role('saga-receiver', {
+  assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: 'lambda.amazonaws.com' })
+});
+
+const receiverLogsPolicy = new aws.iam.RolePolicyAttachment('saga-receiver-logs', {
+  role: receiverRole,
+  policyArn: aws.iam.ManagedPolicy.AWSLambdaBasicExecutionRole
+});
+
+const receiverInvokePolicy = new aws.iam.RolePolicy('saga-receiver-invoke-worker', {
+  role: receiverRole,
+  policy: {
+    Version: '2012-10-17',
+    Statement: [{ Effect: 'Allow', Action: 'lambda:InvokeFunction', Resource: worker.arn }]
+  }
+});
+
+// Slack shows "Something went wrong" unless the slash command is acknowledged within 3 seconds,
+// so the receiver only verifies the request and hands the work off to the worker asynchronously.
+const receiver = new aws.lambda.CallbackFunction(
+  'saga',
+  {
+    runtime,
+    role: receiverRole,
+    timeout: 10,
+    memorySize: 512,
+    environment: {
+      variables: { SLACK_SIGNING_SECRET: slackSigningSecret, WORKER_FUNCTION_NAME: worker.name }
+    },
+    callback: async (event: awsx.apigateway.Request): Promise<awsx.apigateway.Response> => {
+      // Resolved at runtime from the SDK bundled into the Lambda Node.js runtime, so it stays out of the deployment package.
+      const { LambdaClient, InvokeCommand } =
+        require('@aws-sdk/client-lambda') as typeof import('@aws-sdk/client-lambda');
+
+      const rawBody = event.isBase64Encoded
+        ? Buffer.from(event.body ?? '', 'base64').toString('utf-8')
+        : (event.body ?? '');
+
+      const authorized = isSlackSignatureValid({
+        rawBody,
+        timestamp: headerValue(event.headers, 'X-Slack-Request-Timestamp'),
+        signature: headerValue(event.headers, 'X-Slack-Signature'),
+        signingSecret: process.env.SLACK_SIGNING_SECRET ?? ''
+      });
+
+      if (!authorized) {
+        console.error('Rejected request with an invalid Slack signature');
+        return { statusCode: 401, body: 'Invalid Slack signature' };
+      }
+
+      const command = Object.fromEntries(new URLSearchParams(rawBody)) as SlackSlashCommand;
+
+      await new LambdaClient({}).send(
+        new InvokeCommand({
+          FunctionName: process.env.WORKER_FUNCTION_NAME,
+          InvocationType: 'Event',
+          Payload: JSON.stringify(command)
+        })
+      );
+
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response_type: 'ephemeral', text: 'On it!' })
+      };
+    }
+  },
+  { dependsOn: [receiverLogsPolicy, receiverInvokePolicy] }
+);
+
+const api = new awsx.apigateway.API('saga', {
+  routes: [{ path: '', method: 'POST', eventHandler: receiver }]
+});
+
+export const endpoint = api.url;
