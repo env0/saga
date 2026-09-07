@@ -145,41 +145,44 @@ const receiver = new aws.lambda.CallbackFunction(
     environment: {
       variables: { SLACK_SIGNING_SECRET: slackSigningSecret, WORKER_FUNCTION_NAME: worker.name }
     },
-    callback: async (event: awsx.apigateway.Request): Promise<awsx.apigateway.Response> => {
+    callbackFactory: () => {
       // Resolved at runtime from the SDK bundled into the Lambda Node.js runtime, so it stays out of the deployment package.
       const { LambdaClient, InvokeCommand } =
         require('@aws-sdk/client-lambda') as typeof import('@aws-sdk/client-lambda');
+      const lambda = new LambdaClient({});
 
-      const rawBody = event.isBase64Encoded
-        ? Buffer.from(event.body ?? '', 'base64').toString('utf-8')
-        : (event.body ?? '');
+      return async (event: awsx.apigateway.Request): Promise<awsx.apigateway.Response> => {
+        const rawBody = event.isBase64Encoded
+          ? Buffer.from(event.body ?? '', 'base64').toString('utf-8')
+          : (event.body ?? '');
 
-      const authorized = isSlackSignatureValid({
-        rawBody,
-        timestamp: headerValue(event.headers, 'X-Slack-Request-Timestamp'),
-        signature: headerValue(event.headers, 'X-Slack-Signature'),
-        signingSecret: process.env.SLACK_SIGNING_SECRET ?? ''
-      });
+        const authorized = isSlackSignatureValid({
+          rawBody,
+          timestamp: headerValue(event.headers, 'X-Slack-Request-Timestamp'),
+          signature: headerValue(event.headers, 'X-Slack-Signature'),
+          signingSecret: process.env.SLACK_SIGNING_SECRET ?? ''
+        });
 
-      if (!authorized) {
-        console.error('Rejected request with an invalid Slack signature');
-        return { statusCode: 401, body: 'Invalid Slack signature' };
-      }
+        if (!authorized) {
+          console.error('Rejected request with an invalid Slack signature');
+          return { statusCode: 401, body: 'Invalid Slack signature' };
+        }
 
-      const command = Object.fromEntries(new URLSearchParams(rawBody)) as SlackSlashCommand;
+        const command = Object.fromEntries(new URLSearchParams(rawBody)) as SlackSlashCommand;
 
-      await new LambdaClient({}).send(
-        new InvokeCommand({
-          FunctionName: process.env.WORKER_FUNCTION_NAME,
-          InvocationType: 'Event',
-          Payload: JSON.stringify(command)
-        })
-      );
+        await lambda.send(
+          new InvokeCommand({
+            FunctionName: process.env.WORKER_FUNCTION_NAME,
+            InvocationType: 'Event',
+            Payload: JSON.stringify(command)
+          })
+        );
 
-      return {
-        statusCode: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ response_type: 'ephemeral', text: 'On it!' })
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ response_type: 'ephemeral', text: 'On it!' })
+        };
       };
     }
   },
