@@ -2,15 +2,14 @@
     "name": "saga",
     "description": "Slack App for invoking Github Action",
     "devDependencies": {
-        "@types/node": "^16",
-        "prettier": "^2.6.2"
+        "@aws-sdk/client-lambda": "^3.974.0",
+        "@types/node": "^24",
+        "prettier": "^3.6.2",
+        "typescript": "^5.9.2"
     },
     "dependencies": {
-        "@octokit/rest": "^18.12.0",
-        "@pulumi/aws": "^5.0.0",
-        "@pulumi/awsx": "^0.40.0",
-        "@pulumi/pulumi": "^3.0.0",
-        "axios": "^0.26.1",
-        "lodash": "^4.17.21"
+        "@pulumi/aws": "^7.44.0",
+        "@pulumi/awsx": "^3.9.0",
+        "@pulumi/pulumi": "^3.261.0"
     }
 }
